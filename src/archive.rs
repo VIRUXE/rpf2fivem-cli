@@ -59,27 +59,39 @@ fn extract_7z(archive_path: &Path, output_dir: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn extract_rar(archive_path: &Path, output_dir: &Path) -> Result<Vec<PathBuf>> {
-    // RAR extraction using the system unrar or a Rust crate
-    // We use the zip crate's generic approach - for RAR we try via system command
-    let status = std::process::Command::new("unrar")
-        .args(["x", "-y", "-o+"])
-        .arg(archive_path)
-        .arg(output_dir)
-        .status();
+    use unrar::Archive;
 
-    match status {
-        Ok(s) if s.success() => {
-            let mut extracted = Vec::new();
-            collect_files(output_dir, &mut extracted);
-            Ok(extracted)
-        }
-        Ok(s) => bail!("unrar exited with status {}", s),
-        Err(_) => {
-            // Try extracting via zip (some "rar" files are actually zip)
-            extract_zip(archive_path, output_dir)
-                .context("RAR extraction failed (unrar not found, attempted as zip)")
+    let archive = Archive::new(archive_path)
+        .open_for_processing()
+        .with_context(|| format!("Failed to open RAR: {}", archive_path.display()))?;
+
+    let mut extracted = Vec::new();
+
+    let mut current = archive;
+    loop {
+        let header = current.read_header();
+        match header {
+            Ok(Some(entry)) => {
+                let entry_path = output_dir.join(entry.entry().filename.as_os_str());
+                if entry.entry().is_file() {
+                    if let Some(parent) = entry_path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    let (data, next) = entry.read()?;
+                    fs::write(&entry_path, &data)?;
+                    extracted.push(entry_path);
+                    current = next;
+                } else {
+                    let next = entry.skip()?;
+                    current = next;
+                }
+            }
+            Ok(None) => break,
+            Err(e) => bail!("RAR read error: {}", e),
         }
     }
+
+    Ok(extracted)
 }
 
 fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {

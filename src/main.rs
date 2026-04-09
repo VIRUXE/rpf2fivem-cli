@@ -46,7 +46,7 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(normalize_args(std::env::args()));
 
     if let Some(input) = cli.input {
         let name_explicit = cli.name.is_some();
@@ -76,6 +76,22 @@ fn main() -> Result<()> {
         eprintln!("No input provided. Run with --help for usage.");
         std::process::exit(1);
     }
+}
+
+fn normalize_args(args: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut args: Vec<String> = args.into_iter().collect();
+
+    // Allow: rpf2fivem <input> [flags...] by auto-inserting the `convert` subcommand.
+    if let Some(first_arg) = args.get(1) {
+        let known_commands = ["convert", "extract-keys", "help"];
+        let is_option = first_arg.starts_with('-');
+
+        if !is_option && !known_commands.contains(&first_arg.as_str()) {
+            args.insert(1, "convert".to_string());
+        }
+    }
+
+    args
 }
 
 fn cmd_convert(

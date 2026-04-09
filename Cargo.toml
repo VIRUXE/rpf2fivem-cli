@@ -20,6 +20,7 @@ colored = "2"
 sevenz-rust = "0.6"
 tempfile = "3"
 rpf-archive = "0.7.1"
+unrar = "0.5.8"
 
 [profile.release]
 opt-level = 3
