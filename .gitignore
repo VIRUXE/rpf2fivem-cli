@@ -1,9 +1,2 @@
 /target
-keys/
-cache/
 resources/
-combinercache/
-logs/
-*.log
-qbxcore_vehicles.txt
-qbcore_vehicles.txt
