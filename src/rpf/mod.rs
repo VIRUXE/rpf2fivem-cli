@@ -26,10 +26,11 @@ pub enum RpfEncryption {
 impl RpfEncryption {
     fn from_u32(v: u32) -> Self {
         match v {
-            0x04E45504F => Self::None,
-            0x0ffffff9 => Self::Open,
-            0x0ffffff8 => Self::Aes,
-            _ => Self::Ng,
+            0x00000000 => Self::None,
+            0x4E45504F => Self::Open,  // "OPEN" - no encryption
+            0x0FFFFFF9 => Self::Aes,
+            0x0FEFFFFF => Self::Ng,
+            _ => Self::Ng,             // default to NG for unknown values
         }
     }
 }
@@ -188,6 +189,15 @@ impl RpfArchive {
         keys: Option<&GtaKeys>,
         mut on_file: impl FnMut(&str, Vec<u8>),
     ) -> Result<()> {
+        self.extract_all_inner(data, keys, &mut on_file)
+    }
+
+    fn extract_all_inner(
+        &self,
+        data: &[u8],
+        keys: Option<&GtaKeys>,
+        on_file: &mut dyn FnMut(&str, Vec<u8>),
+    ) -> Result<()> {
         let is_aes = self.encryption == RpfEncryption::Aes;
 
         for entry in &self.entries {
@@ -232,7 +242,21 @@ impl RpfArchive {
                         buf
                     };
 
-                    on_file(&entry.name_lower, out);
+                    // Recursively extract nested RPF archives
+                    if entry.name_lower.ends_with(".rpf") {
+                        match RpfArchive::parse_from_bytes(&out, &entry.name_lower, 0, keys) {
+                            Ok(nested) => {
+                                if let Err(e) = nested.extract_all_inner(&out, keys, on_file) {
+                                    eprintln!("[RPF] Error extracting nested {}: {}", entry.name_lower, e);
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("[RPF] Failed to parse nested {}: {}", entry.name_lower, e);
+                            }
+                        }
+                    } else {
+                        on_file(&entry.name_lower, out);
+                    }
                 }
 
                 RpfEntryKind::ResourceFile {
