@@ -11,7 +11,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(
     name = "rpf2fivem",
-    version = "0.1.0",
+    version = env!("CARGO_PKG_VERSION"),
     about = "Convert GTA V .rpf archives to FiveM resource folders",
     arg_required_else_help = true,
 )]
