@@ -13,48 +13,51 @@ use std::path::PathBuf;
     name = "rpf2fivem",
     version = "0.1.0",
     about = "Convert GTA V .rpf archives to FiveM resource folders",
+    arg_required_else_help = true,
 )]
 struct Cli {
+    /// Path to archive (.zip/.rar/.7z), direct download URL, or mod page URL
+    /// (e.g. https://www.gta5-mods.com/vehicles/gta-iv-feltzer)
+    input: Option<String>,
+
+    /// Resource name (default: inferred from URL or filename)
+    #[arg(short, long)]
+    name: Option<String>,
+
+    /// Description written into fxmanifest.lua
+    #[arg(short, long)]
+    description: Option<String>,
+
+    /// Output directory for resources
+    #[arg(short, long, default_value = "resources")]
+    output: PathBuf,
+
+    /// Combine multiple vehicles into a single resource folder
+    #[arg(long)]
+    combine: bool,
+
+    /// Combined resource folder name (used with --combine)
+    #[arg(long, default_value = "combined_vehicles")]
+    combine_name: String,
+
+    /// Path to keys directory (containing gtav_aes_key.dat etc.)
+    #[arg(long, default_value = "keys")]
+    keys: PathBuf,
+
+    /// Generate QBX-Core vehicle list entry
+    #[arg(long)]
+    qbx: bool,
+
+    /// Generate QB-Core vehicle list entry
+    #[arg(long)]
+    qbcore: bool,
+
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Convert a vehicle archive to a FiveM resource
-    Convert {
-        /// Path to archive (.zip/.rar/.7z) or a direct download URL
-        input: String,
-
-        /// Resource name (default: timestamp-based random)
-        #[arg(short, long)]
-        name: Option<String>,
-
-        /// Output directory for resources
-        #[arg(short, long, default_value = "resources")]
-        output: PathBuf,
-
-        /// Combine multiple vehicles into a single resource folder
-        #[arg(long)]
-        combine: bool,
-
-        /// Combined resource folder name (used with --combine)
-        #[arg(long, default_value = "combined_vehicles")]
-        combine_name: String,
-
-        /// Path to keys directory (containing gtav_aes_key.dat etc.)
-        #[arg(long, default_value = "keys")]
-        keys: PathBuf,
-
-        /// Generate QBX-Core vehicle list entry
-        #[arg(long)]
-        qbx: bool,
-
-        /// Generate QB-Core vehicle list entry
-        #[arg(long)]
-        qbcore: bool,
-    },
-
     /// Extract GTA V crypto keys from GTA5.exe (required for encrypted RPFs)
     ExtractKeys {
         /// Path to GTA5.exe
@@ -70,25 +73,46 @@ enum Commands {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    match cli.command {
-        Commands::Convert {
-            input,
-            name,
-            output,
-            combine,
-            combine_name,
-            keys,
-            qbx,
-            qbcore,
-        } => cmd_convert(input, name, output, combine, combine_name, keys, qbx, qbcore),
+    if let Some(cmd) = cli.command {
+        match cmd {
+            Commands::ExtractKeys { exe, output } => cmd_extract_keys(exe, output),
+        }
+    } else if let Some(input) = cli.input {
+        let resource_name = cli.name.unwrap_or_else(|| {
+            // Infer from URL slug or filename, fall back to timestamp nanos
+            converter::name_from_url(&input).unwrap_or_else(|| {
+                use std::time::{SystemTime, UNIX_EPOCH};
+                let n = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.subsec_nanos())
+                    .unwrap_or(12345678);
+                format!("{n}")
+            })
+        });
 
-        Commands::ExtractKeys { exe, output } => cmd_extract_keys(exe, output),
+        cmd_convert(
+            input,
+            resource_name,
+            cli.description,
+            cli.output,
+            cli.combine,
+            cli.combine_name,
+            cli.keys,
+            cli.qbx,
+            cli.qbcore,
+        )
+    } else {
+        // No input and no subcommand — clap's arg_required_else_help should
+        // have already printed help, but guard just in case.
+        eprintln!("No input provided. Run with --help for usage.");
+        std::process::exit(1);
     }
 }
 
 fn cmd_convert(
     input: String,
-    name: Option<String>,
+    resource_name: String,
+    description: Option<String>,
     output: PathBuf,
     combine: bool,
     combine_name: String,
@@ -96,15 +120,6 @@ fn cmd_convert(
     qbx: bool,
     qbcore: bool,
 ) -> Result<()> {
-    let resource_name = name.unwrap_or_else(|| {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let n = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.subsec_nanos())
-            .unwrap_or(12345678);
-        format!("{n}")
-    });
-
     let keys = if keys_path.exists() {
         match rpf::keys::GtaKeys::load_from_path(&keys_path) {
             Ok(k) => {
@@ -131,6 +146,7 @@ fn cmd_convert(
     let opts = converter::ConvertOptions {
         input: &input,
         resource_name: &resource_name,
+        description: description.as_deref(),
         output_dir: &output,
         combined: combine,
         combined_name: &combine_name,
@@ -223,11 +239,7 @@ fn cmd_extract_keys(exe_path: PathBuf, output_path: PathBuf) -> Result<()> {
 
     eprintln!(
         "{}",
-        format!(
-            "[Keys] Keys saved to {}",
-            output_path.display()
-        )
-        .green()
+        format!("[Keys] Keys saved to {}", output_path.display()).green()
     );
 
     Ok(())
