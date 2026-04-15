@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use std::{
+    collections::{BTreeSet, HashMap},
     fs,
+    io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -19,6 +21,8 @@ pub struct ConvertOptions<'a> {
     pub combined: bool,
     pub combined_name: &'a str,
     pub keys: Option<&'a GtaKeys>,
+    /// Remove an existing output resource folder without prompting (`-y` / `--yes`).
+    pub overwrite: bool,
 }
 
 pub struct ConvertResult {
@@ -41,6 +45,13 @@ pub fn convert(opts: &ConvertOptions) -> Result<ConvertResult> {
 
     eprintln!("[Worker] Processing: {}", opts.input);
 
+    let resource_dir = if opts.combined {
+        opts.output_dir.join(opts.combined_name)
+    } else {
+        opts.output_dir.join(opts.resource_name)
+    };
+    ensure_output_writable(&resource_dir, opts.overwrite)?;
+
     // Step 1: Obtain the archive (download or copy)
     let archive_path = acquire_archive(opts.input, cache_path)?;
 
@@ -54,7 +65,7 @@ pub fn convert(opts: &ConvertOptions) -> Result<ConvertResult> {
     let rpf_files = archive::find_rpf_files(&extract_dir);
 
     // Step 4: Set up output structure
-    let (resource_dir, stream_dir, data_dir) = setup_resource_dirs(
+    let (resource_dir, stream_dir, data_dir, sfx_dir, audioconfig_dir) = setup_resource_dirs(
         opts.output_dir,
         opts.resource_name,
         opts.combined,
@@ -68,7 +79,17 @@ pub fn convert(opts: &ConvertOptions) -> Result<ConvertResult> {
     if rpf_files.is_empty() {
         // No RPF found — copy loose stream/data files directly from the archive
         eprintln!("[RPF] No .rpf files found, looking for loose stream files...");
-        copy_loose_files(&extract_dir, &stream_dir, &data_dir, &mut streaming_name, &mut written_meta);
+        copy_loose_files(
+            &extract_dir,
+            &resource_dir,
+            &stream_dir,
+            &data_dir,
+            &sfx_dir,
+            &audioconfig_dir,
+            opts.resource_name,
+            &mut streaming_name,
+            &mut written_meta,
+        );
     }
 
     for rpf_path in &rpf_files {
@@ -98,29 +119,30 @@ pub fn convert(opts: &ConvertOptions) -> Result<ConvertResult> {
             let ext = Path::new(name)
                 .extension()
                 .and_then(|e| e.to_str())
-                .unwrap_or("");
+                .unwrap_or("")
+                .to_ascii_lowercase();
 
             let basename = Path::new(name)
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or(name);
 
-            if STREAM_EXTS.contains(&ext) {
+            if STREAM_EXTS.contains(&ext.as_str()) {
                 // Fix resource header bytes if needed (byte 3 → '7')
                 let mut file_data = data;
-                if ext == "ytd" || ext == "yft" {
+                if ext.as_str() == "ytd" || ext.as_str() == "yft" {
                     fix_resource_header(&mut file_data);
                 }
 
                 // Detect streaming name from ytd/yft pairing
-                if ext == "ytd" && !basename.ends_with("+hi.ytd") {
+                if ext.as_str() == "ytd" && !basename.ends_with("+hi.ytd") {
                     let base = basename.trim_end_matches(".ytd");
                     let yft_path = stream_dir.join(format!("{}.yft", base));
                     if yft_path.exists() {
                         streaming_name = Some(base.to_string());
                         eprintln!("[RPF] Detected streaming name: {}", base);
                     }
-                } else if ext == "yft" {
+                } else if ext.as_str() == "yft" {
                     let base = basename.trim_end_matches(".yft");
                     let ytd_path = stream_dir.join(format!("{}.ytd", base));
                     if ytd_path.exists() {
@@ -135,7 +157,27 @@ pub fn convert(opts: &ConvertOptions) -> Result<ConvertResult> {
                 } else {
                     eprintln!("[Worker] -> stream/{}", basename);
                 }
-            } else if DATA_EXTS.contains(&ext) || EXTRA_DATA_EXTS.contains(&ext) {
+            } else if ext == "awc" {
+                let rel = normalize_sfx_dest(name, opts.resource_name);
+                let dest = sfx_dir.join(rel);
+                if let Some(parent) = dest.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                if let Err(e) = fs::write(&dest, &data) {
+                    eprintln!("[Worker] Failed to write {}: {}", dest.display(), e);
+                } else {
+                    eprintln!("[Worker] -> {}", dest.strip_prefix(&resource_dir).unwrap_or(&dest).display());
+                }
+            } else if is_audio_config_file(name) {
+                let dest_name = audio_config_basename(name);
+                let dest = audioconfig_dir.join(&dest_name);
+                let _ = fs::create_dir_all(&audioconfig_dir);
+                if let Err(e) = fs::write(&dest, &data) {
+                    eprintln!("[Worker] Failed to write {}: {}", dest.display(), e);
+                } else {
+                    eprintln!("[Worker] -> audioconfig/{}", dest_name);
+                }
+            } else if DATA_EXTS.contains(&ext.as_str()) || EXTRA_DATA_EXTS.contains(&ext.as_str()) {
                 // Only accept .meta files that are relevant vehicle data
                 if is_vehicle_meta(name) {
                     let dest = data_dir.join(basename);
@@ -151,17 +193,22 @@ pub fn convert(opts: &ConvertOptions) -> Result<ConvertResult> {
         })?;
     }
 
+    if let Some(ref stream) = streaming_name {
+        align_sfx_wavepack_folder(&sfx_dir, opts.resource_name, stream)?;
+    }
+
     // Step 6: Write fxmanifest.lua now that we know which meta files are present
     let meta_refs: Vec<&str> = written_meta.iter().map(|s| s.as_str()).collect();
+    let audio = discover_audio(&resource_dir);
     let url = if opts.input.starts_with("http://") || opts.input.starts_with("https://") {
         Some(opts.input)
     } else {
         None
     };
     let manifest_content = if opts.combined {
-        manifest::combined(&meta_refs, opts.description, url)
+        manifest::combined(&meta_refs, &audio, opts.description, url)
     } else {
-        manifest::single(&meta_refs, opts.description, url)
+        manifest::single(&meta_refs, &audio, opts.description, url)
     };
     fs::write(resource_dir.join("fxmanifest.lua"), &manifest_content)?;
 
@@ -331,7 +378,7 @@ fn setup_resource_dirs(
     resource_name: &str,
     combined: bool,
     combined_name: &str,
-) -> Result<(PathBuf, PathBuf, PathBuf)> {
+) -> Result<(PathBuf, PathBuf, PathBuf, PathBuf, PathBuf)> {
     let resource_dir = if combined {
         output_dir.join(combined_name)
     } else {
@@ -350,23 +397,259 @@ fn setup_resource_dirs(
         resource_dir.join("data")
     };
 
+    let sfx_dir = if combined {
+        resource_dir.join("sfx").join(resource_name)
+    } else {
+        resource_dir.join("sfx")
+    };
+
+    let audioconfig_dir = if combined {
+        resource_dir.join("audioconfig").join(resource_name)
+    } else {
+        resource_dir.join("audioconfig")
+    };
+
     fs::create_dir_all(&stream_dir)?;
+    fs::create_dir_all(&sfx_dir)?;
+    fs::create_dir_all(&audioconfig_dir)?;
     // data_dir and fxmanifest.lua are written after extraction
 
-    Ok((resource_dir, stream_dir, data_dir))
+    Ok((resource_dir, stream_dir, data_dir, sfx_dir, audioconfig_dir))
+}
+
+fn ensure_output_writable(resource_dir: &Path, overwrite: bool) -> Result<()> {
+    if !resource_dir.exists() {
+        return Ok(());
+    }
+    let non_empty = fs::read_dir(resource_dir)
+        .map(|mut d| d.next().is_some())
+        .unwrap_or(false);
+    if !non_empty {
+        return Ok(());
+    }
+    if overwrite {
+        fs::remove_dir_all(resource_dir).with_context(|| {
+            format!(
+                "Could not remove existing output folder {}",
+                resource_dir.display()
+            )
+        })?;
+        return Ok(());
+    }
+    if io::stdin().is_terminal() {
+        print!(
+            "Output folder {} already exists. Overwrite? [y/N] ",
+            resource_dir.display()
+        );
+        io::stdout().flush()?;
+        let mut line = String::new();
+        io::stdin().read_line(&mut line)?;
+        if line.trim().eq_ignore_ascii_case("y") || line.trim().eq_ignore_ascii_case("yes") {
+            fs::remove_dir_all(resource_dir).with_context(|| {
+                format!(
+                    "Could not remove existing output folder {}",
+                    resource_dir.display()
+                )
+            })?;
+            return Ok(());
+        }
+        anyhow::bail!("Aborted.");
+    }
+    anyhow::bail!(
+        "Output folder {} already exists. Pass --yes to overwrite or remove it first.",
+        resource_dir.display()
+    );
+}
+
+/// Path under `sfx/` (no `sfx/` prefix) for writing into the resource `sfx` folder.
+fn normalize_sfx_dest(internal_name: &str, fallback_dlc: &str) -> PathBuf {
+    let path = internal_name.replace('\\', "/");
+    if let Some(idx) = path.find("/sfx/") {
+        return PathBuf::from(path[idx + 5..].trim_start_matches('/'));
+    }
+    let lower = path.to_ascii_lowercase();
+    if let Some(pos) = lower.find("audio/sfx/") {
+        return PathBuf::from(&path[pos + "audio/sfx/".len()..]);
+    }
+    let file_name = Path::new(&path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("pack.awc");
+    PathBuf::from(format!("dlc_{fallback_dlc}")).join(file_name)
+}
+
+fn audio_config_basename(internal_name: &str) -> String {
+    Path::new(internal_name)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("audio.rel")
+        .to_string()
+}
+
+fn is_audio_config_file(name: &str) -> bool {
+    let base = Path::new(name)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if base.ends_with(".rel") {
+        return base.contains("dat151")
+            || base.contains("dat54")
+            || base.contains("dat10")
+            || base.contains("_game")
+            || base.contains("_sounds");
+    }
+    base.ends_with("_game.dat") || base.ends_with("_sounds.dat")
+}
+
+fn rel_path_posix(root: &Path, full: &Path) -> Option<String> {
+    full.strip_prefix(root).ok().map(|p| {
+        p.components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/")
+    })
+}
+
+fn audio_stem_from_game(name_lower: &str) -> Option<&str> {
+    let idx = name_lower.find("_game.")?;
+    Some(&name_lower[..idx])
+}
+
+fn audio_stem_from_sound(name_lower: &str) -> Option<&str> {
+    let idx = name_lower.find("_sounds.")?;
+    Some(&name_lower[..idx])
+}
+
+/// If `.awc` files fell back to `sfx/dlc_<resource slug>/` but the streaming model name is known
+/// (e.g. `tgrcara`), rename to `sfx/dlc_<model>/` so `AUDIO_WAVEPACK` matches `audioNameHash`.
+fn align_sfx_wavepack_folder(sfx_dir: &Path, resource_slug: &str, streaming_model: &str) -> Result<()> {
+    if resource_slug == streaming_model {
+        return Ok(());
+    }
+    let from = sfx_dir.join(format!("dlc_{resource_slug}"));
+    let to = sfx_dir.join(format!("dlc_{streaming_model}"));
+    if from.exists() && from.is_dir() && !to.exists() {
+        fs::rename(&from, &to).with_context(|| {
+            format!(
+                "Could not rename wavepack folder {} -> {}",
+                from.display(),
+                to.display()
+            )
+        })?;
+        eprintln!(
+            "[Worker] Aligned SFX wavepack folder with streaming model: {}",
+            to.display()
+        );
+    }
+    Ok(())
+}
+
+fn discover_audio(resource_root: &Path) -> manifest::AudioManifest {
+    let mut wavepacks: BTreeSet<String> = BTreeSet::new();
+    let sfx_root = resource_root.join("sfx");
+    if sfx_root.exists() {
+        collect_wavepack_dirs(resource_root, &sfx_root, &mut wavepacks);
+    }
+    let game_sound_pairs = collect_game_sound_pairs(resource_root);
+    manifest::AudioManifest {
+        wavepacks: wavepacks.into_iter().collect(),
+        game_sound_pairs,
+    }
+}
+
+fn collect_wavepack_dirs(resource_root: &Path, dir: &Path, wavepacks: &mut BTreeSet<String>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_wavepack_dirs(resource_root, &path, wavepacks);
+        } else if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("awc"))
+        {
+            if let Some(parent) = path.parent() {
+                if let Some(rel) = rel_path_posix(resource_root, parent) {
+                    wavepacks.insert(rel);
+                }
+            }
+        }
+    }
+}
+
+fn collect_game_sound_pairs(resource_root: &Path) -> Vec<(String, String)> {
+    let ac_root = resource_root.join("audioconfig");
+    if !ac_root.exists() {
+        return Vec::new();
+    }
+    let mut games: HashMap<String, String> = HashMap::new();
+    let mut sounds: HashMap<String, String> = HashMap::new();
+    walk_audioconfig_pairs(&ac_root, resource_root, &mut games, &mut sounds);
+    let mut stems: Vec<String> = games.keys().cloned().collect();
+    stems.sort();
+    let mut pairs = Vec::new();
+    for stem in stems {
+        if let (Some(g), Some(s)) = (games.get(&stem), sounds.get(&stem)) {
+            pairs.push((g.clone(), s.clone()));
+        }
+    }
+    pairs
+}
+
+fn walk_audioconfig_pairs(
+    dir: &Path,
+    resource_root: &Path,
+    games: &mut HashMap<String, String>,
+    sounds: &mut HashMap<String, String>,
+) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            walk_audioconfig_pairs(&path, resource_root, games, sounds);
+            continue;
+        }
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if !is_audio_config_file(name) {
+            continue;
+        }
+        let Some(rel) = rel_path_posix(resource_root, &path) else {
+            continue;
+        };
+        let lower = name.to_ascii_lowercase();
+        if let Some(stem) = audio_stem_from_game(&lower) {
+            games.insert(stem.to_string(), rel.clone());
+        }
+        if let Some(stem) = audio_stem_from_sound(&lower) {
+            sounds.insert(stem.to_string(), rel);
+        }
+    }
 }
 
 /// Copy loose stream/data files directly from the extracted archive directory.
 /// Used when no RPF is present (the mod ships raw .yft/.ytd/.meta files).
 fn copy_loose_files(
     extract_dir: &Path,
+    resource_dir: &Path,
     stream_dir: &Path,
     data_dir: &Path,
+    sfx_dir: &Path,
+    audioconfig_dir: &Path,
+    resource_fallback: &str,
     streaming_name: &mut Option<String>,
     written_meta: &mut Vec<String>,
 ) {
     let mut files: Vec<PathBuf> = Vec::new();
-    collect_files_by_exts(extract_dir, &["yft", "ytd", "ydr", "meta"], &mut files);
+    collect_files_by_exts(
+        extract_dir,
+        &["yft", "ytd", "ydr", "meta", "awc", "rel", "dat"],
+        &mut files,
+    );
 
     for path in &files {
         let ext = path
@@ -409,6 +692,43 @@ fn copy_loose_files(
                 eprintln!("[Loose] Failed to write {}: {}", dest.display(), e);
             } else {
                 eprintln!("[Worker] -> stream/{}", basename);
+            }
+        } else if ext == "awc" {
+            let rel = normalize_sfx_dest(&path.to_string_lossy(), resource_fallback);
+            let dest = sfx_dir.join(rel);
+            if let Some(parent) = dest.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let data = match fs::read(&path) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("[Loose] Cannot read {}: {}", path.display(), e);
+                    continue;
+                }
+            };
+            if let Err(e) = fs::write(&dest, &data) {
+                eprintln!("[Loose] Failed to write {}: {}", dest.display(), e);
+            } else {
+                eprintln!(
+                    "[Worker] -> {}",
+                    dest.strip_prefix(resource_dir).unwrap_or(&dest).display()
+                );
+            }
+        } else if (ext == "rel" || ext == "dat") && is_audio_config_file(&basename) {
+            let dest_name = audio_config_basename(&basename);
+            let dest = audioconfig_dir.join(&dest_name);
+            let _ = fs::create_dir_all(audioconfig_dir);
+            let data = match fs::read(&path) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("[Loose] Cannot read {}: {}", path.display(), e);
+                    continue;
+                }
+            };
+            if let Err(e) = fs::write(&dest, &data) {
+                eprintln!("[Loose] Failed to write {}: {}", dest.display(), e);
+            } else {
+                eprintln!("[Worker] -> audioconfig/{}", dest_name);
             }
         } else if ext == "meta" && is_vehicle_meta(&basename) {
             let data = match fs::read(&path) {

@@ -44,6 +44,10 @@ struct Cli {
     #[arg(long, default_value = "keys")]
     keys: PathBuf,
 
+    /// Overwrite the output resource folder if it already exists (skip prompt)
+    #[arg(short = 'y', long = "yes")]
+    overwrite: bool,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -92,6 +96,7 @@ fn main() -> Result<()> {
             cli.combine,
             cli.combine_name,
             cli.keys,
+            cli.overwrite,
         )
     } else {
         eprintln!("No input provided. Run with --help for usage.");
@@ -108,6 +113,7 @@ fn cmd_convert(
     combine: bool,
     combine_name: String,
     keys_path: PathBuf,
+    overwrite: bool,
 ) -> Result<()> {
     let keys = if keys_path.exists() {
         match rpf::keys::GtaKeys::load_from_path(&keys_path) {
@@ -140,6 +146,7 @@ fn cmd_convert(
         combined: combine,
         combined_name: &combine_name,
         keys: keys.as_ref(),
+        overwrite,
     };
 
     let mut result = converter::convert(&opts)
@@ -152,11 +159,27 @@ fn cmd_convert(
             if model != &resource_name {
                 let new_path = output.join(model);
                 if new_path.exists() {
-                    eprintln!(
-                        "[Worker] Target {} already exists, keeping name {}",
-                        new_path.display(),
-                        resource_name
-                    );
+                    if overwrite {
+                        if let Err(e) = std::fs::remove_dir_all(&new_path) {
+                            eprintln!(
+                                "[Worker] Could not remove {} for rename: {}",
+                                new_path.display(),
+                                e
+                            );
+                        } else if let Err(e) =
+                            std::fs::rename(&result.resource_path, &new_path)
+                        {
+                            eprintln!("[Worker] Could not rename to {}: {}", new_path.display(), e);
+                        } else {
+                            result.resource_path = new_path;
+                        }
+                    } else {
+                        eprintln!(
+                            "[Worker] Target {} already exists, keeping name {}",
+                            new_path.display(),
+                            resource_name
+                        );
+                    }
                 } else if let Err(e) = std::fs::rename(&result.resource_path, &new_path) {
                     eprintln!("[Worker] Could not rename to {}: {}", new_path.display(), e);
                 } else {
