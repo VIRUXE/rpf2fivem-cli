@@ -1,37 +1,61 @@
-/// Generate fxmanifest.lua content for a single resource.
-pub fn single() -> &'static str {
-    r#"fx_version 'cerulean'
-game 'gta5'
+/// Map from meta filename to its FiveM data_file type.
+const META_DIRECTIVES: &[(&str, &str)] = &[
+    ("handling.meta",         "HANDLING_FILE"),
+    ("vehicles.meta",         "VEHICLE_METADATA_FILE"),
+    ("vehiclelayouts.meta",   "VEHICLE_LAYOUTS_FILE"),
+    ("carcols.meta",          "CARCOLS_FILE"),
+    ("carvariations.meta",    "VEHICLE_VARIATION_FILE"),
+    ("dlctext.meta",          "DLCTEXT_FILE"),
+    ("contentunlocks.meta",   "CARCONTENTUNLOCKS_FILE"),
+    ("vehiclemodelsets.meta", "VEHICLE_METADATA_FILE"),
+];
 
-files {
-    'data/*.meta'
+/// Generate fxmanifest.lua for a single resource, only including
+/// data_file directives for meta files that are actually present.
+pub fn single(meta_files: &[&str], description: Option<&str>) -> String {
+    let mut out = String::from("fx_version 'cerulean'\ngame 'gta5'\n");
+
+    if let Some(desc) = description {
+        out.push_str(&format!("\ndescription '{}'\n", desc.replace('\'', "\\'")));
+    }
+
+    if !meta_files.is_empty() {
+        out.push_str("\nfiles {\n    'data/*.meta'\n}\n");
+        for &name in meta_files {
+            if let Some(&(_, directive)) = META_DIRECTIVES.iter().find(|&&(n, _)| n == name) {
+                out.push_str(&format!(
+                    "\ndata_file '{}' 'data/{}'",
+                    directive, name
+                ));
+            }
+        }
+        out.push('\n');
+    }
+
+    out
 }
 
-data_file 'HANDLING_FILE' 'data/handling.meta'
-data_file 'VEHICLE_METADATA_FILE' 'data/vehicles.meta'
-data_file 'VEHICLE_METADATA_FILE' 'data/vehiclelayouts.meta'
-data_file 'CARCOLS_FILE' 'data/carcols.meta'
-data_file 'VEHICLE_VARIATION_FILE' 'data/carvariations.meta'
--- data_file 'VEHICLE_LAYOUTS_FILE' 'data/dlctext.meta'
--- data_file 'VEHICLE_METADATA_FILE' 'data/contentunlocks.meta'
-"#
-}
+/// Generate fxmanifest.lua for a combined resource, only including
+/// data_file directives for meta files that are actually present.
+pub fn combined(meta_files: &[&str], description: Option<&str>) -> String {
+    let mut out = String::from("fx_version 'cerulean'\ngame 'gta5'\n");
 
-/// Generate fxmanifest.lua content for a combined (multi-vehicle) resource.
-pub fn combined() -> &'static str {
-    r#"fx_version 'cerulean'
-game 'gta5'
+    if let Some(desc) = description {
+        out.push_str(&format!("\ndescription '{}'\n", desc.replace('\'', "\\'")));
+    }
 
-files {
-    'data/**/*.meta'
-}
+    if !meta_files.is_empty() {
+        out.push_str("\nfiles {\n    'data/**/*.meta'\n}\n");
+        for &name in meta_files {
+            if let Some(&(_, directive)) = META_DIRECTIVES.iter().find(|&&(n, _)| n == name) {
+                out.push_str(&format!(
+                    "\ndata_file '{}' 'data/**/{}'",
+                    directive, name
+                ));
+            }
+        }
+        out.push('\n');
+    }
 
-data_file 'HANDLING_FILE' 'data/**/handling.meta'
-data_file 'VEHICLE_LAYOUTS_FILE' 'data/**/vehiclelayouts.meta'
-data_file 'VEHICLE_METADATA_FILE' 'data/**/vehicles.meta'
-data_file 'CARCOLS_FILE' 'data/**/carcols.meta'
-data_file 'VEHICLE_VARIATION_FILE' 'data/**/carvariations.meta'
--- data_file 'DLCTEXT_FILE' 'data/**/dlctext.meta'
--- data_file 'CARCONTENTUNLOCKS_FILE' 'data/**/carcontentunlocks.meta'
-"#
+    out
 }
