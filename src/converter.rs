@@ -156,10 +156,15 @@ pub fn convert(opts: &ConvertOptions) -> Result<ConvertResult> {
 
     // Step 6: Write fxmanifest.lua now that we know which meta files are present
     let meta_refs: Vec<&str> = written_meta.iter().map(|s| s.as_str()).collect();
-    let manifest_content = if opts.combined {
-        manifest::combined(&meta_refs, opts.description)
+    let url = if opts.input.starts_with("http://") || opts.input.starts_with("https://") {
+        Some(opts.input)
     } else {
-        manifest::single(&meta_refs, opts.description)
+        None
+    };
+    let manifest_content = if opts.combined {
+        manifest::combined(&meta_refs, opts.description, url)
+    } else {
+        manifest::single(&meta_refs, opts.description, url)
     };
     fs::write(resource_dir.join("fxmanifest.lua"), &manifest_content)?;
 

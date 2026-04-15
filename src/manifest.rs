@@ -12,11 +12,15 @@ const META_DIRECTIVES: &[(&str, &str)] = &[
 
 /// Generate fxmanifest.lua for a single resource, only including
 /// data_file directives for meta files that are actually present.
-pub fn single(meta_files: &[&str], description: Option<&str>) -> String {
+pub fn single(meta_files: &[&str], description: Option<&str>, url: Option<&str>) -> String {
     let mut out = String::from("fx_version 'cerulean'\ngame 'gta5'\n");
 
     if let Some(desc) = description {
         out.push_str(&format!("\ndescription '{}'\n", desc.replace('\'', "\\'")));
+    }
+
+    if let Some(u) = url {
+        out.push_str(&format!("url '{}'\n", u.replace('\'', "\\'")));
     }
 
     if !meta_files.is_empty() {
@@ -37,11 +41,15 @@ pub fn single(meta_files: &[&str], description: Option<&str>) -> String {
 
 /// Generate fxmanifest.lua for a combined resource, only including
 /// data_file directives for meta files that are actually present.
-pub fn combined(meta_files: &[&str], description: Option<&str>) -> String {
+pub fn combined(meta_files: &[&str], description: Option<&str>, url: Option<&str>) -> String {
     let mut out = String::from("fx_version 'cerulean'\ngame 'gta5'\n");
 
     if let Some(desc) = description {
         out.push_str(&format!("\ndescription '{}'\n", desc.replace('\'', "\\'")));
+    }
+
+    if let Some(u) = url {
+        out.push_str(&format!("url '{}'\n", u.replace('\'', "\\'")));
     }
 
     if !meta_files.is_empty() {
