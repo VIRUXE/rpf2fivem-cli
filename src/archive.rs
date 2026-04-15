@@ -115,18 +115,73 @@ fn collect_by_ext(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Download a file from a URL, returning local path.
-pub fn download(url: &str, dest: &Path) -> Result<()> {
+/// Download a file from a URL into cache_dir, returning the saved path.
+/// The filename is taken from the Content-Disposition header if available,
+/// otherwise inferred from the URL's last path segment.
+pub fn download(url: &str, cache_dir: &Path) -> Result<PathBuf> {
     eprintln!("[Download] Fetching {}...", url);
-    let response = reqwest::blocking::get(url)
+
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .build()?;
+
+    let response = client.get(url).send()
         .with_context(|| format!("HTTP request failed: {}", url))?;
 
     if !response.status().is_success() {
         bail!("HTTP {} for {}", response.status(), url);
     }
 
+    // Prefer filename from Content-Disposition, fall back to URL segment
+    let filename = response
+        .headers()
+        .get("content-disposition")
+        .and_then(|v| v.to_str().ok())
+        .and_then(filename_from_content_disposition)
+        .or_else(|| {
+            url.split('/')
+                .last()
+                .filter(|s| !s.is_empty() && s.contains('.'))
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| "download.zip".to_string());
+
     let bytes = response.bytes()?;
-    fs::write(dest, &bytes)?;
+
+    // Detect an HTML error page served instead of the actual file
+    if bytes.starts_with(b"<!DOCTYPE") || bytes.starts_with(b"<!doctype") || bytes.starts_with(b"<html") {
+        bail!(
+            "Received an HTML page instead of a file download.\n\
+             The site may require browser interaction or the link has expired.\n\
+             Try downloading the file manually and pass the local path instead."
+        );
+    }
+
+    let dest = cache_dir.join(&filename);
+    fs::write(&dest, &bytes)?;
     eprintln!("[Download] Saved {} bytes to {}", bytes.len(), dest.display());
-    Ok(())
+    Ok(dest)
+}
+
+fn filename_from_content_disposition(header: &str) -> Option<String> {
+    for part in header.split(';') {
+        let part = part.trim();
+        // RFC 5987 extended value: filename*=UTF-8''name.zip
+        if let Some(rest) = part.strip_prefix("filename*=") {
+            let name = rest.trim();
+            let name = name.split_once("''").map(|(_, n)| n).unwrap_or(name);
+            let name = name.trim_matches('"');
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+        // Plain value: filename="name.zip"
+        if let Some(rest) = part.strip_prefix("filename=") {
+            let name = rest.trim().trim_matches('"');
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
 }
