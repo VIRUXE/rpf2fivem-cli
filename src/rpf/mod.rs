@@ -12,6 +12,14 @@ use std::{
 use keys::GtaKeys;
 use crypto::{decrypt_aes, decrypt_ng, decompress};
 
+/// Compute resource version field from system+graphics page flags.
+/// Matches CodeWalker's RpfResourceFileEntry.GetVersionFromFlags.
+fn version_from_flags(sys_flags: u32, gfx_flags: u32) -> u32 {
+    let sv = (sys_flags >> 28) & 0xF;
+    let gv = (gfx_flags >> 28) & 0xF;
+    (sv << 4) | gv
+}
+
 const RPF7_MAGIC: u32 = 0x52504637;
 const RESOURCE_IDENT: u32 = 0x37435352;
 
@@ -172,7 +180,28 @@ impl RpfArchive {
         };
         let _ = (is_aes, is_ng); // used for future extension
 
-        let entries = parse_entries(&entries_data, &names_data, entry_count)?;
+        let mut entries = parse_entries(&entries_data, &names_data, entry_count)?;
+
+        // Resolve resource entries with size=0xFFFFFF (size encoded in body)
+        for entry in &mut entries {
+            if let RpfEntryKind::ResourceFile {
+                file_offset,
+                file_size,
+                ..
+            } = &mut entry.kind
+            {
+                if *file_size == 0xFFFFFF {
+                    let body_off = start_pos + (*file_offset as usize * 512);
+                    if body_off + 16 <= data.len() {
+                        let b = &data[body_off..body_off + 16];
+                        *file_size = ((b[7] as u32) << 0)
+                            | ((b[14] as u32) << 8)
+                            | ((b[5] as u32) << 16)
+                            | ((b[2] as u32) << 24);
+                    }
+                }
+            }
+        }
 
         Ok(Self {
             path: path.to_string(),
@@ -279,6 +308,8 @@ impl RpfArchive {
                         continue;
                     }
 
+                    // Skip the in-RPF RSC7 header; the payload is the
+                    // (possibly encrypted) deflate-compressed body.
                     let raw = &data[byte_offset + header_skip..byte_offset + total];
                     let mut buf = raw.to_vec();
 
@@ -292,20 +323,17 @@ impl RpfArchive {
                         }
                     }
 
-                    let deflated = decompress(&buf).unwrap_or(buf);
-
-                    // Add resource header (RSC7 header)
-                    let mut out = Vec::with_capacity(deflated.len() + 16);
+                    // FiveM streaming expects a real RSC7 file: 16-byte header
+                    // followed by the original deflate-compressed payload.
+                    // Do NOT decompress/recompress — that would invalidate the
+                    // page-layout encoded in SystemFlags/GraphicsFlags.
+                    let version = version_from_flags(*system_flags, *graphics_flags);
+                    let mut out = Vec::with_capacity(buf.len() + 16);
                     out.extend_from_slice(&RESOURCE_IDENT.to_le_bytes());
-                    // Version field from system_flags top nibble
-                    let version = (*system_flags >> 28) & 0xF;
                     out.extend_from_slice(&version.to_le_bytes());
                     out.extend_from_slice(&system_flags.to_le_bytes());
                     out.extend_from_slice(&graphics_flags.to_le_bytes());
-
-                    // Re-compress for FiveM streaming
-                    let recompressed = crypto::compress(&deflated);
-                    out.extend_from_slice(&recompressed);
+                    out.extend_from_slice(&buf);
 
                     on_file(&entry.name_lower, out);
                 }
