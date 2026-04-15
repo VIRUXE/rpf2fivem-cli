@@ -20,7 +20,7 @@ struct Cli {
     /// (e.g. https://www.gta5-mods.com/vehicles/gta-iv-feltzer)
     input: Option<String>,
 
-    /// Resource name (default: inferred from URL or filename)
+    /// Resource name (default: detected streaming model name)
     #[arg(short, long)]
     name: Option<String>,
 
@@ -43,14 +43,6 @@ struct Cli {
     /// Path to keys directory (containing gtav_aes_key.dat etc.)
     #[arg(long, default_value = "keys")]
     keys: PathBuf,
-
-    /// Generate QBX-Core vehicle list entry
-    #[arg(long)]
-    qbx: bool,
-
-    /// Generate QB-Core vehicle list entry
-    #[arg(long)]
-    qbcore: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -78,8 +70,9 @@ fn main() -> Result<()> {
             Commands::ExtractKeys { exe, output } => cmd_extract_keys(exe, output),
         }
     } else if let Some(input) = cli.input {
+        let name_explicit = cli.name.is_some();
         let resource_name = cli.name.unwrap_or_else(|| {
-            // Infer from URL slug or filename, fall back to timestamp nanos
+            // Provisional name; renamed to streaming model after extraction.
             converter::name_from_url(&input).unwrap_or_else(|| {
                 use std::time::{SystemTime, UNIX_EPOCH};
                 let n = SystemTime::now()
@@ -93,17 +86,14 @@ fn main() -> Result<()> {
         cmd_convert(
             input,
             resource_name,
+            name_explicit,
             cli.description,
             cli.output,
             cli.combine,
             cli.combine_name,
             cli.keys,
-            cli.qbx,
-            cli.qbcore,
         )
     } else {
-        // No input and no subcommand — clap's arg_required_else_help should
-        // have already printed help, but guard just in case.
         eprintln!("No input provided. Run with --help for usage.");
         std::process::exit(1);
     }
@@ -112,13 +102,12 @@ fn main() -> Result<()> {
 fn cmd_convert(
     input: String,
     resource_name: String,
+    name_explicit: bool,
     description: Option<String>,
     output: PathBuf,
     combine: bool,
     combine_name: String,
     keys_path: PathBuf,
-    qbx: bool,
-    qbcore: bool,
 ) -> Result<()> {
     let keys = if keys_path.exists() {
         match rpf::keys::GtaKeys::load_from_path(&keys_path) {
@@ -151,12 +140,31 @@ fn cmd_convert(
         combined: combine,
         combined_name: &combine_name,
         keys: keys.as_ref(),
-        qbx,
-        qbcore,
     };
 
-    let result = converter::convert(&opts)
+    let mut result = converter::convert(&opts)
         .with_context(|| format!("Conversion failed for: {}", input))?;
+
+    // If the user did not pass -n, rename the resource folder to the
+    // detected streaming model name (the .yft basename).
+    if !name_explicit && !combine {
+        if let Some(model) = &result.streaming_name {
+            if model != &resource_name {
+                let new_path = output.join(model);
+                if new_path.exists() {
+                    eprintln!(
+                        "[Worker] Target {} already exists, keeping name {}",
+                        new_path.display(),
+                        resource_name
+                    );
+                } else if let Err(e) = std::fs::rename(&result.resource_path, &new_path) {
+                    eprintln!("[Worker] Could not rename to {}: {}", new_path.display(), e);
+                } else {
+                    result.resource_path = new_path;
+                }
+            }
+        }
+    }
 
     eprintln!(
         "{}",
@@ -170,54 +178,8 @@ fn cmd_convert(
 
     if let Some(model) = &result.streaming_name {
         eprintln!("[Done] Streaming model: {}", model.cyan());
-        if qbx || qbcore {
-            handle_helper_output(&resource_name, Some(model.as_str()), qbx, qbcore)?;
-        }
-    } else if qbx || qbcore {
-        handle_helper_output(&resource_name, None, qbx, qbcore)?;
     }
 
-    Ok(())
-}
-
-fn handle_helper_output(
-    resource_name: &str,
-    streaming_name: Option<&str>,
-    qbx: bool,
-    qbcore: bool,
-) -> Result<()> {
-    let model = streaming_name.unwrap_or(resource_name);
-
-    if qbx {
-        append_file(
-            "qbxcore_vehicles.txt",
-            &format!(
-                "{model} = {{\n    name = 'Unknown',\n    brand = 'Unknown',\n    model = '{model}',\n    price = 0,\n    category = 'Compacts',\n    type = 'automobile',\n    hash = '{model}',\n}},\n"
-            ),
-        )?;
-        eprintln!("[Helper] Appended to qbxcore_vehicles.txt");
-    }
-
-    if qbcore {
-        append_file(
-            "qbcore_vehicles.txt",
-            &format!(
-                "{{ model = '{model}', name = 'Unknown', brand = 'Unknown', price = 0, category = 'Compacts', type = 'automobile', shop = 'none' }},\n"
-            ),
-        )?;
-        eprintln!("[Helper] Appended to qbcore_vehicles.txt");
-    }
-
-    Ok(())
-}
-
-fn append_file(filename: &str, content: &str) -> Result<()> {
-    use std::io::Write;
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(filename)?;
-    f.write_all(content.as_bytes())?;
     Ok(())
 }
 

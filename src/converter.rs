@@ -11,7 +11,6 @@ use crate::{
     rpf::{keys::GtaKeys, RpfArchive},
 };
 
-#[allow(dead_code)]
 pub struct ConvertOptions<'a> {
     pub input: &'a str,
     pub resource_name: &'a str,
@@ -20,8 +19,6 @@ pub struct ConvertOptions<'a> {
     pub combined: bool,
     pub combined_name: &'a str,
     pub keys: Option<&'a GtaKeys>,
-    pub qbx: bool,
-    pub qbcore: bool,
 }
 
 pub struct ConvertResult {
