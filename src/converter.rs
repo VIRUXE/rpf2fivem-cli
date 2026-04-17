@@ -10,7 +10,7 @@ use std::{
 use crate::{
     archive,
     manifest,
-    rpf::{keys::GtaKeys, RpfArchive},
+    rpf::{GtaKeys, RpfArchive},
 };
 
 pub struct ConvertOptions<'a> {
@@ -102,12 +102,7 @@ pub fn convert(opts: &ConvertOptions) -> Result<ConvertResult> {
             .and_then(|n| n.to_str())
             .unwrap_or("dlc.rpf");
 
-        let archive = match RpfArchive::parse_from_bytes(
-            &rpf_data,
-            rpf_filename,
-            0,
-            opts.keys,
-        ) {
+        let archive = match RpfArchive::parse(&rpf_data, rpf_filename, opts.keys) {
             Ok(a) => a,
             Err(e) => {
                 eprintln!("[RPF] Skipping {}: {}", rpf_path.display(), e);
@@ -115,7 +110,7 @@ pub fn convert(opts: &ConvertOptions) -> Result<ConvertResult> {
             }
         };
 
-        archive.extract_all(&rpf_data, opts.keys, |name, data| {
+        archive.walk_files(&rpf_data, opts.keys, "", &mut |name, data| {
             let ext = Path::new(name)
                 .extension()
                 .and_then(|e| e.to_str())

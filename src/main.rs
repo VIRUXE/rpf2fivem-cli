@@ -116,7 +116,7 @@ fn cmd_convert(
     overwrite: bool,
 ) -> Result<()> {
     let keys = if keys_path.exists() {
-        match rpf::keys::GtaKeys::load_from_path(&keys_path) {
+        match rpf::GtaKeys::load_from_path(&keys_path) {
             Ok(k) => {
                 eprintln!("{}", "[Keys] Crypto keys loaded.".green());
                 Some(k)
@@ -219,7 +219,7 @@ fn cmd_extract_keys(exe_path: PathBuf, output_path: PathBuf) -> Result<()> {
         format!("[Keys] Extracting from {}...", exe_path.display()).cyan()
     );
 
-    rpf::keys::GtaKeys::extract_from_exe(&exe_path, Some(&output_path))
+    rpf::GtaKeys::extract_from_exe(&exe_path, Some(&output_path))
         .context("Key extraction failed")?;
 
     eprintln!(

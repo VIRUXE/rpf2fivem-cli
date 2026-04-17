@@ -10,15 +10,12 @@ clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 flate2 = "1"
 zip = "2"
-aes = "0.8"
-ecb = "0.1"
-cipher = "0.4"
-sha1 = "0.10"
 reqwest = { version = "0.12", features = ["blocking"] }
 indicatif = "0.17"
 colored = "2"
 sevenz-rust = "0.6"
 tempfile = "3"
+rage-rpf = { path = "../rage-rpf" }
 
 [profile.release]
 opt-level = 3
