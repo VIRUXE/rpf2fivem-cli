@@ -1,6 +1,6 @@
 [package]
 name = "rpf2fivem-cli"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 description = "Convert .rpf files to FiveM resource folders"
 license = "MPL-2.0"
@@ -15,7 +15,7 @@ indicatif = "0.17"
 colored = "2"
 sevenz-rust = "0.6"
 tempfile = "3"
-rage-rpf = { path = "../rage-rpf" }
+rage-rpf = { version = "0.2.0", path = "../rage-rpf" }
 
 [profile.release]
 opt-level = 3
