@@ -19,7 +19,7 @@ indicatif = "0.17"
 colored = "2"
 sevenz-rust = "0.6"
 tempfile = "3"
-rage-rpf = { version = "0.2.0", path = "../rage-rpf" }
+rage-rpf = "0.3.0"
 
 [profile.release]
 opt-level = 3
