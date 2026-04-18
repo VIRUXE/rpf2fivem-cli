@@ -14,13 +14,16 @@ const META_DIRECTIVES: &[(&str, &str)] = &[
 pub struct AudioManifest {
     /// `AUDIO_WAVEPACK` folder paths, e.g. `sfx/dlc_mycar`
     pub wavepacks: Vec<String>,
-    /// Matched `(AUDIO_GAMEDATA path, AUDIO_SOUNDDATA path)` pairs (same stem as `*_game` / `*_sounds`).
-    pub game_sound_pairs: Vec<(String, String)>,
+    /// Physical .rel/.dat files that must be in the 'files' section.
+    pub physical_files: Vec<String>,
+    /// Matched `(AUDIO_GAMEDATA path, AUDIO_SOUNDDATA path)` pairs for the data_file section.
+    /// These are the "clean" versions (e.g. .dat instead of .dat151.rel).
+    pub game_sound_data: Vec<(String, String)>,
 }
 
 impl AudioManifest {
     pub fn is_empty(&self) -> bool {
-        self.wavepacks.is_empty() && self.game_sound_pairs.is_empty()
+        self.wavepacks.is_empty() && self.game_sound_data.is_empty()
     }
 }
 
@@ -51,7 +54,9 @@ pub fn single(
         }
         if has_audio {
             out.push_str("    'sfx/**/*.awc',\n");
-            out.push_str("    'audioconfig/**/*',\n");
+            for phys in &audio.physical_files {
+                out.push_str(&format!("    '{}',\n", phys.replace('\'', "\\'")));
+            }
         }
         out.push_str("}\n");
     }
@@ -100,7 +105,9 @@ pub fn combined(
         }
         if has_audio {
             out.push_str("    'sfx/**/*.awc',\n");
-            out.push_str("    'audioconfig/**/*',\n");
+            for phys in &audio.physical_files {
+                out.push_str(&format!("    '{}',\n", phys.replace('\'', "\\'")));
+            }
         }
         out.push_str("}\n");
     }
@@ -123,7 +130,7 @@ pub fn combined(
 }
 
 fn append_audio_directives(out: &mut String, audio: &AudioManifest) {
-    for (game, sound) in &audio.game_sound_pairs {
+    for (game, sound) in &audio.game_sound_data {
         out.push_str(&format!(
             "\ndata_file 'AUDIO_GAMEDATA' '{}'",
             game.replace('\'', "\\'")
@@ -139,7 +146,7 @@ fn append_audio_directives(out: &mut String, audio: &AudioManifest) {
             wp.replace('\'', "\\'")
         ));
     }
-    if !audio.game_sound_pairs.is_empty() || !audio.wavepacks.is_empty() {
+    if !audio.game_sound_data.is_empty() || !audio.wavepacks.is_empty() {
         out.push('\n');
     }
 }

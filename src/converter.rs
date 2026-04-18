@@ -10,7 +10,7 @@ use std::{
 use crate::{
     archive,
     manifest,
-    rpf::{GtaKeys, RpfArchive},
+    rpf::RpfArchive,
 };
 
 pub struct ConvertOptions<'a> {
@@ -20,7 +20,6 @@ pub struct ConvertOptions<'a> {
     pub output_dir: &'a Path,
     pub combined: bool,
     pub combined_name: &'a str,
-    pub keys: Option<&'a GtaKeys>,
     /// Remove an existing output resource folder without prompting (`-y` / `--yes`).
     pub overwrite: bool,
 }
@@ -102,7 +101,7 @@ pub fn convert(opts: &ConvertOptions) -> Result<ConvertResult> {
             .and_then(|n| n.to_str())
             .unwrap_or("dlc.rpf");
 
-        let archive = match RpfArchive::parse(&rpf_data, rpf_filename, opts.keys) {
+        let archive = match RpfArchive::parse(&rpf_data, rpf_filename, None) {
             Ok(a) => a,
             Err(e) => {
                 eprintln!("[RPF] Skipping {}: {}", rpf_path.display(), e);
@@ -110,7 +109,7 @@ pub fn convert(opts: &ConvertOptions) -> Result<ConvertResult> {
             }
         };
 
-        archive.walk_files(&rpf_data, opts.keys, "", &mut |name, data| {
+        archive.walk_files(&rpf_data, None, "", &mut |name, data| {
             let ext = Path::new(name)
                 .extension()
                 .and_then(|e| e.to_str())
@@ -470,7 +469,14 @@ fn normalize_sfx_dest(internal_name: &str, fallback_dlc: &str) -> PathBuf {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("pack.awc");
-    PathBuf::from(format!("dlc_{fallback_dlc}")).join(file_name)
+
+    let stem = Path::new(file_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(fallback_dlc);
+    let dlc_name = stem.trim_end_matches("_npc");
+
+    PathBuf::from(format!("dlc_{dlc_name}")).join(file_name)
 }
 
 fn audio_config_basename(internal_name: &str) -> String {
@@ -487,7 +493,7 @@ fn is_audio_config_file(name: &str) -> bool {
         .and_then(|n| n.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    if base.ends_with(".rel") {
+    if base.ends_with(".rel") || base.ends_with(".nametable") {
         return base.contains("dat151")
             || base.contains("dat54")
             || base.contains("dat10")
@@ -518,6 +524,7 @@ fn audio_stem_from_sound(name_lower: &str) -> Option<&str> {
 
 /// If `.awc` files fell back to `sfx/dlc_<resource slug>/` but the streaming model name is known
 /// (e.g. `tgrcara`), rename to `sfx/dlc_<model>/` so `AUDIO_WAVEPACK` matches `audioNameHash`.
+/// Only renames if the current folder matches the resource slug (meaning it was a fallback).
 fn align_sfx_wavepack_folder(sfx_dir: &Path, resource_slug: &str, streaming_model: &str) -> Result<()> {
     if resource_slug == streaming_model {
         return Ok(());
@@ -532,13 +539,11 @@ fn align_sfx_wavepack_folder(sfx_dir: &Path, resource_slug: &str, streaming_mode
                 to.display()
             )
         })?;
-        eprintln!(
-            "[Worker] Aligned SFX wavepack folder with streaming model: {}",
-            to.display()
-        );
+        eprintln!("[Worker] Aligned SFX wavepack folder with streaming model: {}", to.display());
     }
     Ok(())
 }
+
 
 fn discover_audio(resource_root: &Path) -> manifest::AudioManifest {
     let mut wavepacks: BTreeSet<String> = BTreeSet::new();
@@ -546,10 +551,11 @@ fn discover_audio(resource_root: &Path) -> manifest::AudioManifest {
     if sfx_root.exists() {
         collect_wavepack_dirs(resource_root, &sfx_root, &mut wavepacks);
     }
-    let game_sound_pairs = collect_game_sound_pairs(resource_root);
+    let (physical_files, game_sound_data) = collect_game_sound_pairs(resource_root);
     manifest::AudioManifest {
         wavepacks: wavepacks.into_iter().collect(),
-        game_sound_pairs,
+        physical_files,
+        game_sound_data,
     }
 }
 
@@ -575,30 +581,33 @@ fn collect_wavepack_dirs(resource_root: &Path, dir: &Path, wavepacks: &mut BTree
     }
 }
 
-fn collect_game_sound_pairs(resource_root: &Path) -> Vec<(String, String)> {
+fn collect_game_sound_pairs(resource_root: &Path) -> (Vec<String>, Vec<(String, String)>) {
     let ac_root = resource_root.join("audioconfig");
     if !ac_root.exists() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
-    let mut games: HashMap<String, String> = HashMap::new();
-    let mut sounds: HashMap<String, String> = HashMap::new();
+    let mut games: HashMap<String, (String, String)> = HashMap::new();
+    let mut sounds: HashMap<String, (String, String)> = HashMap::new();
     walk_audioconfig_pairs(&ac_root, resource_root, &mut games, &mut sounds);
     let mut stems: Vec<String> = games.keys().cloned().collect();
     stems.sort();
-    let mut pairs = Vec::new();
+    let mut physical = Vec::new();
+    let mut data_pairs = Vec::new();
     for stem in stems {
-        if let (Some(g), Some(s)) = (games.get(&stem), sounds.get(&stem)) {
-            pairs.push((g.clone(), s.clone()));
+        if let (Some((g_phys, g_data)), Some((s_phys, s_data))) = (games.get(&stem), sounds.get(&stem)) {
+            physical.push(g_phys.clone());
+            physical.push(s_phys.clone());
+            data_pairs.push((g_data.clone(), s_data.clone()));
         }
     }
-    pairs
+    (physical, data_pairs)
 }
 
 fn walk_audioconfig_pairs(
     dir: &Path,
     resource_root: &Path,
-    games: &mut HashMap<String, String>,
-    sounds: &mut HashMap<String, String>,
+    games: &mut HashMap<String, (String, String)>,
+    sounds: &mut HashMap<String, (String, String)>,
 ) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
@@ -613,15 +622,16 @@ fn walk_audioconfig_pairs(
         if !is_audio_config_file(name) {
             continue;
         }
-        let Some(rel) = rel_path_posix(resource_root, &path) else {
+        let Some(rel_phys) = rel_path_posix(resource_root, &path) else {
             continue;
         };
         let lower = name.to_ascii_lowercase();
         if let Some(stem) = audio_stem_from_game(&lower) {
-            games.insert(stem.to_string(), rel.clone());
-        }
-        if let Some(stem) = audio_stem_from_sound(&lower) {
-            sounds.insert(stem.to_string(), rel);
+            let data_alias = format!("audioconfig/{stem}_game.dat");
+            games.insert(stem.to_string(), (rel_phys, data_alias));
+        } else if let Some(stem) = audio_stem_from_sound(&lower) {
+            let data_alias = format!("audioconfig/{stem}_sounds.dat");
+            sounds.insert(stem.to_string(), (rel_phys, data_alias));
         }
     }
 }

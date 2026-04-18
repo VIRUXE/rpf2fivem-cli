@@ -4,7 +4,7 @@ mod manifest;
 mod rpf;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use colored::Colorize;
 use std::path::PathBuf;
 
@@ -40,40 +40,15 @@ struct Cli {
     #[arg(long, default_value = "combined_vehicles")]
     combine_name: String,
 
-    /// Path to keys directory (containing gtav_aes_key.dat etc.)
-    #[arg(long, default_value = "keys")]
-    keys: PathBuf,
-
     /// Overwrite the output resource folder if it already exists (skip prompt)
     #[arg(short = 'y', long = "yes")]
     overwrite: bool,
-
-    #[command(subcommand)]
-    command: Option<Commands>,
-}
-
-#[derive(Subcommand)]
-enum Commands {
-    /// Extract GTA V crypto keys from GTA5.exe (required for encrypted RPFs)
-    ExtractKeys {
-        /// Path to GTA5.exe
-        #[arg(long, default_value = "GTA5.exe")]
-        exe: PathBuf,
-
-        /// Directory to save extracted key files
-        #[arg(short, long, default_value = "keys")]
-        output: PathBuf,
-    },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    if let Some(cmd) = cli.command {
-        match cmd {
-            Commands::ExtractKeys { exe, output } => cmd_extract_keys(exe, output),
-        }
-    } else if let Some(input) = cli.input {
+    if let Some(input) = cli.input {
         let name_explicit = cli.name.is_some();
         let resource_name = cli.name.unwrap_or_else(|| {
             // Provisional name; renamed to streaming model after extraction.
@@ -95,7 +70,6 @@ fn main() -> Result<()> {
             cli.output,
             cli.combine,
             cli.combine_name,
-            cli.keys,
             cli.overwrite,
         )
     } else {
@@ -112,30 +86,8 @@ fn cmd_convert(
     output: PathBuf,
     combine: bool,
     combine_name: String,
-    keys_path: PathBuf,
     overwrite: bool,
 ) -> Result<()> {
-    let keys = if keys_path.exists() {
-        match rpf::GtaKeys::load_from_path(&keys_path) {
-            Ok(k) => {
-                eprintln!("{}", "[Keys] Crypto keys loaded.".green());
-                Some(k)
-            }
-            Err(e) => {
-                eprintln!("{}: {}", "[Keys] Warning: could not load keys".yellow(), e);
-                eprintln!("       Run `rpf2fivem extract-keys` to extract keys from GTA5.exe.");
-                None
-            }
-        }
-    } else {
-        eprintln!(
-            "{}",
-            "[Keys] No keys directory found — RPF decryption disabled.".yellow()
-        );
-        eprintln!("       Run `rpf2fivem extract-keys --exe /path/to/GTA5.exe` first.");
-        None
-    };
-
     std::fs::create_dir_all(&output)?;
 
     let opts = converter::ConvertOptions {
@@ -145,7 +97,6 @@ fn cmd_convert(
         output_dir: &output,
         combined: combine,
         combined_name: &combine_name,
-        keys: keys.as_ref(),
         overwrite,
     };
 
@@ -202,30 +153,6 @@ fn cmd_convert(
     if let Some(model) = &result.streaming_name {
         eprintln!("[Done] Streaming model: {}", model.cyan());
     }
-
-    Ok(())
-}
-
-fn cmd_extract_keys(exe_path: PathBuf, output_path: PathBuf) -> Result<()> {
-    if !exe_path.exists() {
-        anyhow::bail!(
-            "GTA5.exe not found at '{}'. Specify path with --exe.",
-            exe_path.display()
-        );
-    }
-
-    eprintln!(
-        "{}",
-        format!("[Keys] Extracting from {}...", exe_path.display()).cyan()
-    );
-
-    rpf::GtaKeys::extract_from_exe(&exe_path, Some(&output_path))
-        .context("Key extraction failed")?;
-
-    eprintln!(
-        "{}",
-        format!("[Keys] Keys saved to {}", output_path.display()).green()
-    );
 
     Ok(())
 }
