@@ -29,7 +29,7 @@ struct Cli {
     description: Option<String>,
 
     /// Output directory for resources
-    #[arg(short, long, default_value = "resources")]
+    #[arg(short, long, default_value = ".")]
     output: PathBuf,
 
     /// Combine multiple vehicles into a single resource folder
