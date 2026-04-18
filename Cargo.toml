@@ -19,7 +19,7 @@ indicatif = "0.17"
 colored = "2"
 sevenz-rust = "0.6"
 tempfile = "3"
-rage-rpf = "0.3.0"
+rage-rpf = "0.4.0"
 
 [profile.release]
 opt-level = 3
