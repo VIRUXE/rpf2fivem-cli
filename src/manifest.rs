@@ -38,11 +38,11 @@ pub fn single(
     let mut out = String::from("fx_version 'cerulean'\ngame 'gta5'\n");
 
     if let Some(desc) = description {
-        out.push_str(&format!("\ndescription '{}'\n", desc.replace('\'', "\\'")));
+        out.push_str(&format!("\ndescription {}\n", quote_lua(desc)));
     }
 
     if let Some(u) = url {
-        out.push_str(&format!("url '{}'\n", u.replace('\'', "\\'")));
+        out.push_str(&format!("url {}\n", quote_lua(u)));
     }
 
     let has_meta = !meta_files.is_empty();
@@ -55,7 +55,7 @@ pub fn single(
         if has_audio {
             out.push_str("    'sfx/**/*.awc',\n");
             for phys in &audio.physical_files {
-                out.push_str(&format!("    '{}',\n", phys.replace('\'', "\\'")));
+                out.push_str(&format!("    {},\n", quote_lua(phys)));
             }
         }
         out.push_str("}\n");
@@ -89,11 +89,11 @@ pub fn combined(
     let mut out = String::from("fx_version 'cerulean'\ngame 'gta5'\n");
 
     if let Some(desc) = description {
-        out.push_str(&format!("\ndescription '{}'\n", desc.replace('\'', "\\'")));
+        out.push_str(&format!("\ndescription {}\n", quote_lua(desc)));
     }
 
     if let Some(u) = url {
-        out.push_str(&format!("url '{}'\n", u.replace('\'', "\\'")));
+        out.push_str(&format!("url {}\n", quote_lua(u)));
     }
 
     let has_meta = !meta_files.is_empty();
@@ -106,7 +106,7 @@ pub fn combined(
         if has_audio {
             out.push_str("    'sfx/**/*.awc',\n");
             for phys in &audio.physical_files {
-                out.push_str(&format!("    '{}',\n", phys.replace('\'', "\\'")));
+                out.push_str(&format!("    {},\n", quote_lua(phys)));
             }
         }
         out.push_str("}\n");
@@ -132,21 +132,29 @@ pub fn combined(
 fn append_audio_directives(out: &mut String, audio: &AudioManifest) {
     for (game, sound) in &audio.game_sound_data {
         out.push_str(&format!(
-            "\ndata_file 'AUDIO_GAMEDATA' '{}'",
-            game.replace('\'', "\\'")
+            "\ndata_file 'AUDIO_GAMEDATA' {}",
+            quote_lua(game)
         ));
         out.push_str(&format!(
-            "\ndata_file 'AUDIO_SOUNDDATA' '{}'",
-            sound.replace('\'', "\\'")
+            "\ndata_file 'AUDIO_SOUNDDATA' {}",
+            quote_lua(sound)
         ));
     }
     for wp in &audio.wavepacks {
         out.push_str(&format!(
-            "\ndata_file 'AUDIO_WAVEPACK' '{}'",
-            wp.replace('\'', "\\'")
+            "\ndata_file 'AUDIO_WAVEPACK' {}",
+            quote_lua(wp)
         ));
     }
     if !audio.game_sound_data.is_empty() || !audio.wavepacks.is_empty() {
         out.push('\n');
+    }
+}
+
+fn quote_lua(s: &str) -> String {
+    if s.contains('\'') && !s.contains('"') {
+        format!("\"{}\"", s)
+    } else {
+        format!("'{}'", s.replace('\'', "\\'"))
     }
 }
