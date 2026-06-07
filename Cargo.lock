@@ -1519,7 +1519,9 @@ dependencies = [
 
 [[package]]
 name = "rpf-archive"
-version = "0.7.0"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7d1d4402ee65cc77657f46d892cd064a68ecfc49633e7078548422a1e0ea52b"
 dependencies = [
  "aes",
  "anyhow",
@@ -1538,7 +1540,7 @@ dependencies = [
 
 [[package]]
 name = "rpf2fivem-cli"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "clap",

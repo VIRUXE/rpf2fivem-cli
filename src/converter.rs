@@ -7,11 +7,7 @@ use std::{
     time::Instant,
 };
 
-use crate::{
-    archive,
-    manifest,
-    rpf::RpfArchive,
-};
+use crate::{archive, manifest, rpf::RpfArchive};
 
 pub struct ConvertOptions<'a> {
     pub input: &'a str,
@@ -30,12 +26,11 @@ pub struct ConvertResult {
     pub elapsed_ms: u128,
 }
 
-/// Stream folder file extensions (go into stream/)
-const STREAM_EXTS: &[&str] = &["yft", "ytd", "ydr"];
-/// Data folder file extensions (go into data/)
-const DATA_EXTS: &[&str] = &["meta"];
-/// Additional data extensions that are also valid
-const EXTRA_DATA_EXTS: &[&str] = &["xml"];
+/// Assets which FiveM can stream directly.
+const STREAM_EXTS: &[&str] = &[
+    "yft", "ytd", "ydr", "ydd", "ybn", "ymap", "ytyp", "ynd", "ynv", "ycd",
+];
+const DATA_EXTS: &[&str] = &["meta", "ymt", "dat", "xml"];
 
 pub fn convert(opts: &ConvertOptions) -> Result<ConvertResult> {
     let timer = Instant::now();
@@ -73,7 +68,7 @@ pub fn convert(opts: &ConvertOptions) -> Result<ConvertResult> {
 
     // Step 5: Extract relevant files from each RPF
     let mut streaming_name: Option<String> = None;
-    let mut written_meta: Vec<String> = Vec::new();
+    let mut written_data: Vec<manifest::DataFile> = Vec::new();
 
     if rpf_files.is_empty() {
         // No RPF found — copy loose stream/data files directly from the archive
@@ -87,14 +82,14 @@ pub fn convert(opts: &ConvertOptions) -> Result<ConvertResult> {
             &audioconfig_dir,
             opts.resource_name,
             &mut streaming_name,
-            &mut written_meta,
+            &mut written_data,
         );
     }
 
     for rpf_path in &rpf_files {
         eprintln!("[RPF] Parsing {}...", rpf_path.display());
-        let rpf_data = fs::read(rpf_path)
-            .with_context(|| format!("Cannot read {}", rpf_path.display()))?;
+        let rpf_data =
+            fs::read(rpf_path).with_context(|| format!("Cannot read {}", rpf_path.display()))?;
 
         let rpf_filename = rpf_path
             .file_name()
@@ -121,7 +116,21 @@ pub fn convert(opts: &ConvertOptions) -> Result<ConvertResult> {
                 .and_then(|n| n.to_str())
                 .unwrap_or(name);
 
-            if STREAM_EXTS.contains(&ext.as_str()) {
+            if let Some(data_rel) = data_relative_path(name) {
+                let dest = data_dir.join(&data_rel);
+                if let Some(parent) = dest.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                if let Err(e) = fs::write(&dest, &data) {
+                    eprintln!("[Worker] Failed to write {}: {}", dest.display(), e);
+                } else {
+                    register_data_file(&resource_dir, &dest, &mut written_data);
+                    eprintln!(
+                        "[Worker] -> {}",
+                        dest.strip_prefix(&resource_dir).unwrap_or(&dest).display()
+                    );
+                }
+            } else if STREAM_EXTS.contains(&ext.as_str()) {
                 // Fix resource header bytes if needed (byte 3 → '7')
                 let mut file_data = data;
                 if ext.as_str() == "ytd" || ext.as_str() == "yft" {
@@ -145,7 +154,10 @@ pub fn convert(opts: &ConvertOptions) -> Result<ConvertResult> {
                     }
                 }
 
-                let dest = stream_dir.join(basename);
+                let dest = stream_dir.join(stream_relative_path(basename, &ext));
+                if let Some(parent) = dest.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
                 if let Err(e) = fs::write(&dest, &file_data) {
                     eprintln!("[Worker] Failed to write {}: {}", dest.display(), e);
                 } else {
@@ -160,7 +172,10 @@ pub fn convert(opts: &ConvertOptions) -> Result<ConvertResult> {
                 if let Err(e) = fs::write(&dest, &data) {
                     eprintln!("[Worker] Failed to write {}: {}", dest.display(), e);
                 } else {
-                    eprintln!("[Worker] -> {}", dest.strip_prefix(&resource_dir).unwrap_or(&dest).display());
+                    eprintln!(
+                        "[Worker] -> {}",
+                        dest.strip_prefix(&resource_dir).unwrap_or(&dest).display()
+                    );
                 }
             } else if is_audio_config_file(name) {
                 let dest_name = audio_config_basename(name);
@@ -171,18 +186,6 @@ pub fn convert(opts: &ConvertOptions) -> Result<ConvertResult> {
                 } else {
                     eprintln!("[Worker] -> audioconfig/{}", dest_name);
                 }
-            } else if DATA_EXTS.contains(&ext.as_str()) || EXTRA_DATA_EXTS.contains(&ext.as_str()) {
-                // Only accept .meta files that are relevant vehicle data
-                if is_vehicle_meta(name) {
-                    let dest = data_dir.join(basename);
-                    let _ = fs::create_dir_all(&data_dir);
-                    if let Err(e) = fs::write(&dest, &data) {
-                        eprintln!("[Worker] Failed to write {}: {}", dest.display(), e);
-                    } else {
-                        eprintln!("[Worker] -> data/{}", basename);
-                        written_meta.push(basename.to_string());
-                    }
-                }
             }
         })?;
     }
@@ -192,7 +195,8 @@ pub fn convert(opts: &ConvertOptions) -> Result<ConvertResult> {
     }
 
     // Step 6: Write fxmanifest.lua now that we know which meta files are present
-    let meta_refs: Vec<&str> = written_meta.iter().map(|s| s.as_str()).collect();
+    written_data.sort_by(|a, b| a.path.cmp(&b.path));
+    written_data.dedup_by(|a, b| a.path == b.path);
     let audio = discover_audio(&resource_dir);
     let url = if opts.input.starts_with("http://") || opts.input.starts_with("https://") {
         Some(opts.input)
@@ -200,9 +204,9 @@ pub fn convert(opts: &ConvertOptions) -> Result<ConvertResult> {
         None
     };
     let manifest_content = if opts.combined {
-        manifest::combined(&meta_refs, &audio, opts.description, url)
+        manifest::combined(&written_data, &audio, opts.description, url)
     } else {
-        manifest::single(&meta_refs, &audio, opts.description, url)
+        manifest::single(&written_data, &audio, opts.description, url)
     };
     fs::write(resource_dir.join("fxmanifest.lua"), &manifest_content)?;
 
@@ -222,10 +226,7 @@ fn acquire_archive(input: &str, cache_dir: &Path) -> Result<PathBuf> {
         archive::download(&download_url, cache_dir)
     } else {
         let src = Path::new(input);
-        let dest = cache_dir.join(
-            src.file_name()
-                .context("Input has no filename")?,
-        );
+        let dest = cache_dir.join(src.file_name().context("Input has no filename")?);
         fs::copy(src, &dest)?;
         Ok(dest)
     }
@@ -353,8 +354,15 @@ fn extract_url_base(url: &str) -> Result<String> {
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
         .context("URL missing scheme")?;
-    let host = without_scheme.split('/').next().context("URL missing host")?;
-    let scheme = if url.starts_with("https://") { "https" } else { "http" };
+    let host = without_scheme
+        .split('/')
+        .next()
+        .context("URL missing host")?;
+    let scheme = if url.starts_with("https://") {
+        "https"
+    } else {
+        "http"
+    };
     Ok(format!("{}://{}", scheme, host))
 }
 
@@ -525,7 +533,11 @@ fn audio_stem_from_sound(name_lower: &str) -> Option<&str> {
 /// If `.awc` files fell back to `sfx/dlc_<resource slug>/` but the streaming model name is known
 /// (e.g. `tgrcara`), rename to `sfx/dlc_<model>/` so `AUDIO_WAVEPACK` matches `audioNameHash`.
 /// Only renames if the current folder matches the resource slug (meaning it was a fallback).
-fn align_sfx_wavepack_folder(sfx_dir: &Path, resource_slug: &str, streaming_model: &str) -> Result<()> {
+fn align_sfx_wavepack_folder(
+    sfx_dir: &Path,
+    resource_slug: &str,
+    streaming_model: &str,
+) -> Result<()> {
     if resource_slug == streaming_model {
         return Ok(());
     }
@@ -539,11 +551,13 @@ fn align_sfx_wavepack_folder(sfx_dir: &Path, resource_slug: &str, streaming_mode
                 to.display()
             )
         })?;
-        eprintln!("[Worker] Aligned SFX wavepack folder with streaming model: {}", to.display());
+        eprintln!(
+            "[Worker] Aligned SFX wavepack folder with streaming model: {}",
+            to.display()
+        );
     }
     Ok(())
 }
-
 
 fn discover_audio(resource_root: &Path) -> manifest::AudioManifest {
     let mut wavepacks: BTreeSet<String> = BTreeSet::new();
@@ -589,7 +603,13 @@ fn collect_game_sound_pairs(resource_root: &Path) -> (Vec<String>, Vec<(String, 
     let mut games: HashMap<String, (String, String)> = HashMap::new();
     let mut sounds: HashMap<String, (String, String)> = HashMap::new();
     let mut all_physical: BTreeSet<String> = BTreeSet::new();
-    walk_audioconfig_pairs(&ac_root, resource_root, &mut games, &mut sounds, &mut all_physical);
+    walk_audioconfig_pairs(
+        &ac_root,
+        resource_root,
+        &mut games,
+        &mut sounds,
+        &mut all_physical,
+    );
     let mut stems: Vec<String> = games.keys().cloned().collect();
     stems.sort();
     let mut data_pairs = Vec::new();
@@ -647,12 +667,15 @@ fn copy_loose_files(
     audioconfig_dir: &Path,
     resource_fallback: &str,
     streaming_name: &mut Option<String>,
-    written_meta: &mut Vec<String>,
+    written_data: &mut Vec<manifest::DataFile>,
 ) {
     let mut files: Vec<PathBuf> = Vec::new();
     collect_files_by_exts(
         extract_dir,
-        &["yft", "ytd", "ydr", "meta", "awc", "rel", "dat"],
+        &[
+            "yft", "ytd", "ydr", "ydd", "ybn", "ymap", "ytyp", "ynd", "ynv", "ycd", "ymt", "ipl",
+            "meta", "xml", "awc", "rel", "dat",
+        ],
         &mut files,
     );
 
@@ -667,7 +690,28 @@ fn copy_loose_files(
             None => continue,
         };
 
-        if STREAM_EXTS.contains(&ext.as_str()) {
+        if let Some(data_rel) = data_relative_path(&path.to_string_lossy()) {
+            let data = match fs::read(path) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("[Loose] Cannot read {}: {}", path.display(), e);
+                    continue;
+                }
+            };
+            let dest = data_dir.join(data_rel);
+            if let Some(parent) = dest.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            if let Err(e) = fs::write(&dest, &data) {
+                eprintln!("[Loose] Failed to write {}: {}", dest.display(), e);
+            } else {
+                register_data_file(resource_dir, &dest, written_data);
+                eprintln!(
+                    "[Worker] -> {}",
+                    dest.strip_prefix(resource_dir).unwrap_or(&dest).display()
+                );
+            }
+        } else if STREAM_EXTS.contains(&ext.as_str()) {
             // Skip +hi variants for streaming name detection (keep _hi.yft as a separate file)
             if ext == "ytd" && !basename.ends_with("+hi.ytd") {
                 let base = basename.trim_end_matches(".ytd");
@@ -687,12 +731,18 @@ fn copy_loose_files(
 
             let mut data = match fs::read(&path) {
                 Ok(d) => d,
-                Err(e) => { eprintln!("[Loose] Cannot read {}: {}", path.display(), e); continue; }
+                Err(e) => {
+                    eprintln!("[Loose] Cannot read {}: {}", path.display(), e);
+                    continue;
+                }
             };
             if ext == "ytd" || ext == "yft" {
                 fix_resource_header(&mut data);
             }
-            let dest = stream_dir.join(&basename);
+            let dest = stream_dir.join(stream_relative_path(&basename, &ext));
+            if let Some(parent) = dest.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
             if let Err(e) = fs::write(&dest, &data) {
                 eprintln!("[Loose] Failed to write {}: {}", dest.display(), e);
             } else {
@@ -735,19 +785,6 @@ fn copy_loose_files(
             } else {
                 eprintln!("[Worker] -> audioconfig/{}", dest_name);
             }
-        } else if ext == "meta" && is_vehicle_meta(&basename) {
-            let data = match fs::read(&path) {
-                Ok(d) => d,
-                Err(e) => { eprintln!("[Loose] Cannot read {}: {}", path.display(), e); continue; }
-            };
-            let dest = data_dir.join(&basename);
-            let _ = fs::create_dir_all(&data_dir);
-            if let Err(e) = fs::write(&dest, &data) {
-                eprintln!("[Loose] Failed to write {}: {}", dest.display(), e);
-            } else {
-                eprintln!("[Worker] -> data/{}", basename);
-                written_meta.push(basename.clone());
-            }
         }
     }
 
@@ -757,25 +794,8 @@ fn copy_loose_files(
 }
 
 fn collect_files_by_exts(dir: &Path, exts: &[&str], out: &mut Vec<PathBuf>) {
-    let mut all: Vec<PathBuf> = Vec::new();
-    collect_files_by_exts_recursive(dir, exts, &mut all);
-
-    // Deduplicate by basename: keep the shallowest path (fewest components)
-    let mut seen: std::collections::HashMap<String, PathBuf> = std::collections::HashMap::new();
-    for path in all {
-        let basename = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-        let depth = path.components().count();
-        let entry = seen.entry(basename).or_insert_with(|| path.clone());
-        if path.components().count() < entry.components().count() {
-            *entry = path;
-        }
-        let _ = depth;
-    }
-    out.extend(seen.into_values());
+    collect_files_by_exts_recursive(dir, exts, out);
+    out.sort();
 }
 
 fn collect_files_by_exts_recursive(dir: &Path, exts: &[&str], out: &mut Vec<PathBuf>) {
@@ -793,6 +813,62 @@ fn collect_files_by_exts_recursive(dir: &Path, exts: &[&str], out: &mut Vec<Path
     }
 }
 
+fn data_relative_path(source_name: &str) -> Option<PathBuf> {
+    let normalized = source_name.replace('\\', "/");
+    let lower = normalized.to_ascii_lowercase();
+    let basename = Path::new(&normalized).file_name()?.to_str()?;
+    let basename_lower = basename.to_ascii_lowercase();
+    let ext = Path::new(&basename_lower).extension()?.to_str()?;
+    if !DATA_EXTS.contains(&ext) {
+        return None;
+    }
+
+    for category in ["vehiclelayouts", "vehicles", "handling", "peds", "clipsets"] {
+        if let Some(suffix) = suffix_from_category(&normalized, &lower, category) {
+            let relative = PathBuf::from(suffix);
+            let resource_path = format!("data/{}", relative.to_string_lossy().replace('\\', "/"));
+            return manifest::directive_for(&resource_path).map(|_| relative);
+        }
+    }
+
+    let root_path = format!("data/{basename_lower}");
+    if manifest::directive_for(&root_path).is_some() {
+        return Some(PathBuf::from(basename));
+    }
+
+    None
+}
+
+fn suffix_from_category<'a>(original: &'a str, lower: &str, category: &str) -> Option<&'a str> {
+    let marker = format!("/{category}/");
+    if let Some(index) = lower.rfind(&marker) {
+        return Some(&original[index + 1..]);
+    }
+    let prefix = format!("{category}/");
+    lower.starts_with(&prefix).then_some(original)
+}
+
+fn stream_relative_path(basename: &str, ext: &str) -> PathBuf {
+    match ext {
+        "ymap" | "ytyp" | "ybn" => PathBuf::from("maps").join(basename),
+        "ynd" | "ynv" => PathBuf::from("paths").join(basename),
+        _ => PathBuf::from(basename),
+    }
+}
+
+fn register_data_file(
+    resource_root: &Path,
+    destination: &Path,
+    files: &mut Vec<manifest::DataFile>,
+) {
+    let Some(path) = rel_path_posix(resource_root, destination) else {
+        return;
+    };
+    if let Some(directive) = manifest::directive_for(&path) {
+        files.push(manifest::DataFile { directive, path });
+    }
+}
+
 /// Fix the resource header so byte index 3 is '7' (0x37).
 /// This corrects a quirk in some extracted files.
 fn fix_resource_header(data: &mut Vec<u8>) {
@@ -801,21 +877,112 @@ fn fix_resource_header(data: &mut Vec<u8>) {
     }
 }
 
-/// Check if a .meta filename is a vehicle-relevant data file.
-fn is_vehicle_meta(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    matches!(
-        Path::new(&lower)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(""),
-        "handling.meta"
-            | "vehicles.meta"
-            | "vehiclelayouts.meta"
-            | "carcols.meta"
-            | "carvariations.meta"
-            | "dlctext.meta"
-            | "contentunlocks.meta"
-            | "vehiclemodelsets.meta"
-    )
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_data_without_flattening_semantic_directories() {
+        assert_eq!(
+            data_relative_path("common/data/vehicles/main.meta"),
+            Some(PathBuf::from("vehicles/main.meta"))
+        );
+        assert_eq!(
+            data_relative_path("common/data/peds/main.meta"),
+            Some(PathBuf::from("peds/main.meta"))
+        );
+        assert_eq!(
+            data_relative_path("common/data/scenario/region/davis.ymt"),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_and_unknown_data() {
+        assert_eq!(data_relative_path("common/data/dispatch.meta"), None);
+        assert_eq!(data_relative_path("common/data/unknown.meta"), None);
+        assert_eq!(data_relative_path("common/data/random.ymt"), None);
+        assert_eq!(
+            data_relative_path("common/data/vehicles/arbitrary.xml"),
+            None
+        );
+    }
+
+    #[test]
+    fn separates_streamed_maps_and_paths() {
+        assert_eq!(
+            stream_relative_path("city.ymap", "ymap"),
+            PathBuf::from("maps/city.ymap")
+        );
+        assert_eq!(
+            stream_relative_path("nodes1.ynd", "ynd"),
+            PathBuf::from("paths/nodes1.ynd")
+        );
+    }
+
+    #[test]
+    fn loose_conversion_only_writes_known_fivem_safe_files() {
+        let source = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        for relative in [
+            "data/vehicles/main.meta",
+            "data/peds/main.meta",
+            "data/scenario/region/davis.ymt",
+            "data/dispatch.meta",
+            "data/unknown.meta",
+            "stream/random.ymt",
+            "stream/legacy.ipl",
+            "stream/city.ymap",
+            "stream/nodes1.ynd",
+        ] {
+            let path = source.path().join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"test").unwrap();
+        }
+
+        let resource = output.path().join("resource");
+        let stream = resource.join("stream");
+        let data = resource.join("data");
+        let sfx = resource.join("sfx");
+        let audioconfig = resource.join("audioconfig");
+        for dir in [&stream, &data, &sfx, &audioconfig] {
+            fs::create_dir_all(dir).unwrap();
+        }
+
+        let mut streaming_name = None;
+        let mut written_data = Vec::new();
+        copy_loose_files(
+            source.path(),
+            &resource,
+            &stream,
+            &data,
+            &sfx,
+            &audioconfig,
+            "resource",
+            &mut streaming_name,
+            &mut written_data,
+        );
+
+        assert!(data.join("vehicles/main.meta").exists());
+        assert!(data.join("peds/main.meta").exists());
+        assert!(!data.join("scenario/region/davis.ymt").exists());
+        assert!(!data.join("dispatch.meta").exists());
+        assert!(!data.join("unknown.meta").exists());
+        assert!(!stream.join("random.ymt").exists());
+        assert!(!stream.join("legacy.ipl").exists());
+        assert!(stream.join("maps/city.ymap").exists());
+        assert!(stream.join("paths/nodes1.ynd").exists());
+
+        written_data.sort_by(|a, b| a.path.cmp(&b.path));
+        let audio = manifest::AudioManifest {
+            wavepacks: Vec::new(),
+            physical_files: Vec::new(),
+            game_sound_data: Vec::new(),
+        };
+        let generated = manifest::single(&written_data, &audio, None, None);
+        assert!(generated.contains("PED_METADATA_FILE"));
+        assert!(generated.contains("VEHICLE_METADATA_FILE"));
+        assert!(!generated.contains("data_file 'DISPATCH_FILE'"));
+        assert!(!generated.contains("data_file 'SCENARIO"));
+    }
 }

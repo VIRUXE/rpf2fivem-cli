@@ -1,0 +1,66 @@
+name: Release binaries
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build and upload
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x86_64
+            runner: windows-latest
+            binary: target/release/rpf2fivem.exe
+            archive: rpf2fivem-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}-windows-x86_64.zip
+          - platform: linux-x86_64
+            runner: ubuntu-latest
+            binary: target/release/rpf2fivem
+            archive: rpf2fivem-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}-linux-x86_64.tar.gz
+
+    steps:
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        run: echo "tag=${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release.outputs.tag }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -LiteralPath '${{ matrix.binary }}' -DestinationPath '${{ matrix.archive }}'
+
+      - name: Package Linux binary
+        if: runner.os == 'Linux'
+        shell: bash
+        run: tar -czf '${{ matrix.archive }}' -C target/release rpf2fivem
+
+      - name: Upload release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: gh release upload '${{ steps.release.outputs.tag }}' '${{ matrix.archive }}' --clobber
