@@ -3,7 +3,7 @@ name = "rpf2fivem-cli"
 version = "0.1.7"
 edition = "2024"
 description = "Convert .rpf files to FiveM resource folders"
-license = "MPL-2.0"
+license = "Unlicense"
 
 [[bin]]
 name = "rpf2fivem"

@@ -128,4 +128,4 @@ assets for an existing tag.
 
 ## License
 
-MPL-2.0
+Unlicense
