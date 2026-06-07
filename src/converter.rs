@@ -588,19 +588,17 @@ fn collect_game_sound_pairs(resource_root: &Path) -> (Vec<String>, Vec<(String, 
     }
     let mut games: HashMap<String, (String, String)> = HashMap::new();
     let mut sounds: HashMap<String, (String, String)> = HashMap::new();
-    walk_audioconfig_pairs(&ac_root, resource_root, &mut games, &mut sounds);
+    let mut all_physical: BTreeSet<String> = BTreeSet::new();
+    walk_audioconfig_pairs(&ac_root, resource_root, &mut games, &mut sounds, &mut all_physical);
     let mut stems: Vec<String> = games.keys().cloned().collect();
     stems.sort();
-    let mut physical = Vec::new();
     let mut data_pairs = Vec::new();
     for stem in stems {
-        if let (Some((g_phys, g_data)), Some((s_phys, s_data))) = (games.get(&stem), sounds.get(&stem)) {
-            physical.push(g_phys.clone());
-            physical.push(s_phys.clone());
+        if let (Some((_, g_data)), Some((_, s_data))) = (games.get(&stem), sounds.get(&stem)) {
             data_pairs.push((g_data.clone(), s_data.clone()));
         }
     }
-    (physical, data_pairs)
+    (all_physical.into_iter().collect(), data_pairs)
 }
 
 fn walk_audioconfig_pairs(
@@ -608,6 +606,7 @@ fn walk_audioconfig_pairs(
     resource_root: &Path,
     games: &mut HashMap<String, (String, String)>,
     sounds: &mut HashMap<String, (String, String)>,
+    all_physical: &mut BTreeSet<String>,
 ) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
@@ -615,7 +614,7 @@ fn walk_audioconfig_pairs(
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            walk_audioconfig_pairs(&path, resource_root, games, sounds);
+            walk_audioconfig_pairs(&path, resource_root, games, sounds, all_physical);
             continue;
         }
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -625,6 +624,7 @@ fn walk_audioconfig_pairs(
         let Some(rel_phys) = rel_path_posix(resource_root, &path) else {
             continue;
         };
+        all_physical.insert(rel_phys.clone());
         let lower = name.to_ascii_lowercase();
         if let Some(stem) = audio_stem_from_game(&lower) {
             let data_alias = format!("audioconfig/{stem}_game.dat");
